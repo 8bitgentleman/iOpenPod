@@ -47,6 +47,11 @@ class TrackMapping:
     # Artwork hash for change detection (MD5 of embedded image bytes)
     art_hash: Optional[str] = None
 
+    # Plex integration fields (None for local-file-sourced tracks)
+    plex_rating_key: Optional[str] = None       # Stable Plex track ID
+    plex_updated_at: Optional[str] = None       # ISO timestamp of Plex updatedAt
+    plex_fingerprint_cache: Optional[str] = None  # Cached Chromaprint fingerprint
+
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dict."""
         d = asdict(self)
@@ -66,6 +71,9 @@ class TrackMapping:
             was_transcoded=data["was_transcoded"],
             source_path_hint=data.get("source_path_hint"),
             art_hash=data.get("art_hash"),
+            plex_rating_key=data.get("plex_rating_key"),
+            plex_updated_at=data.get("plex_updated_at"),
+            plex_fingerprint_cache=data.get("plex_fingerprint_cache"),
         )
 
 
@@ -85,6 +93,15 @@ class MappingFile:
     _tracks: dict[str, list[TrackMapping]] | None = None
     _dbid_index: dict[int, tuple[str, TrackMapping]] | None = None
 
+    # Plex integration state
+    # Set of Plex ratingKey strings the user has checked for sync
+    plex_selected_keys: list[str] | None = None
+    # Set of Plex playlist keys the user has opted in to sync
+    plex_synced_playlist_keys: list[str] | None = None
+    # Last-known state of each synced playlist, keyed by playlist ratingKey
+    # Value: {"name": str, "track_rating_keys": [str], "last_synced": str}
+    plex_playlist_snapshots: dict[str, dict] | None = None
+
     def __post_init__(self):
         if self._tracks is None:
             self._tracks = {}
@@ -93,6 +110,12 @@ class MappingFile:
         if not self.modified:
             self.modified = self.created
         self._dbid_index = None
+        if self.plex_selected_keys is None:
+            self.plex_selected_keys = []
+        if self.plex_synced_playlist_keys is None:
+            self.plex_synced_playlist_keys = []
+        if self.plex_playlist_snapshots is None:
+            self.plex_playlist_snapshots = {}
 
     @property
     def tracks(self) -> dict[str, list[TrackMapping]]:
@@ -250,7 +273,7 @@ class MappingFile:
 
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dict."""
-        return {
+        d: dict = {
             "version": self.version,
             "created": self.created,
             "modified": self.modified,
@@ -259,6 +282,13 @@ class MappingFile:
                 for fp, entries in self.tracks.items()
             },
         }
+        if self.plex_selected_keys is not None:
+            d["plex_selected_keys"] = self.plex_selected_keys
+        if self.plex_synced_playlist_keys is not None:
+            d["plex_synced_playlist_keys"] = self.plex_synced_playlist_keys
+        if self.plex_playlist_snapshots is not None:
+            d["plex_playlist_snapshots"] = self.plex_playlist_snapshots
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "MappingFile":
@@ -284,6 +314,9 @@ class MappingFile:
             created=data.get("created", ""),
             modified=data.get("modified", ""),
             _tracks=tracks,
+            plex_selected_keys=data.get("plex_selected_keys"),
+            plex_synced_playlist_keys=data.get("plex_synced_playlist_keys"),
+            plex_playlist_snapshots=data.get("plex_playlist_snapshots"),
         )
 
 
