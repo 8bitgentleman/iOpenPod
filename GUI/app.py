@@ -15,6 +15,7 @@ from GUI.widgets.syncReview import SyncReviewWidget, SyncWorker, PCFolderDialog,
 from GUI.widgets.settingsPage import SettingsPage
 from GUI.widgets.backupBrowser import BackupBrowserWidget
 from GUI.widgets.dropOverlay import DropOverlayWidget
+from GUI.widgets.plexBrowser import PlexBrowser
 from GUI.settings import get_settings
 from GUI.notifications import Notifier
 from GUI.styles import Colors, FONT_FAMILY, Metrics, btn_css, scaled, font_scaled
@@ -1084,6 +1085,9 @@ class MainWindow(QMainWindow):
         self.centralStack = QStackedWidget()
         self.setCentralWidget(self.centralStack)
 
+        # Plex config (loaded lazily on first click)
+        self._plex_connected = False
+
         # Sync worker reference
         self._sync_worker = None
         self._sync_execute_worker = None
@@ -1164,8 +1168,15 @@ class MainWindow(QMainWindow):
         self.sidebar = Sidebar()
         self.mainLayout.addWidget(self.sidebar)
 
+        # Panel stack: index 0 = music browser, index 1 = plex browser
+        self._panel_stack = QStackedWidget()
         self.musicBrowser = MusicBrowser()
-        self.mainLayout.addWidget(self.musicBrowser)
+        self._panel_stack.addWidget(self.musicBrowser)   # index 0
+
+        self.plexBrowser = PlexBrowser()
+        self._panel_stack.addWidget(self.plexBrowser)    # index 1
+
+        self.mainLayout.addWidget(self._panel_stack)
 
         self.centralStack.addWidget(self.mainWidget)  # Index 0
 
@@ -1186,8 +1197,7 @@ class MainWindow(QMainWindow):
         self.backupBrowser.closed.connect(self.hideBackupBrowser)
         self.centralStack.addWidget(self.backupBrowser)  # Index 3
 
-        self.sidebar.category_changed.connect(
-            self.musicBrowser.updateCategory)
+        self.sidebar.category_changed.connect(self._onCategoryChanged)
 
         # Podcast sync → goes through the standard sync review pipeline
         self.musicBrowser.podcastBrowser.podcast_sync_requested.connect(
@@ -1211,6 +1221,15 @@ class MainWindow(QMainWindow):
         # Connect backup button
         self.sidebar.backupButton.clicked.connect(self.showBackupBrowser)
 
+        # Connect Plex Library button
+        self.sidebar.plex_library_clicked.connect(self._onPlexLibraryClicked)
+
+        # Forward Plex download progress to sidebar
+        self.plexBrowser.download_progress.connect(self.sidebar.set_plex_download_progress)
+
+        # Wire Plex sync button to the existing sync flow
+        self.plexBrowser.sync_requested.connect(self.startPCSync)
+
     def _on_theme_changed(self):
         """Rebuild the entire UI after a live theme switch."""
         from GUI.styles import build_palette, app_stylesheet
@@ -1230,6 +1249,9 @@ class MainWindow(QMainWindow):
         # Rebuild with new theme colours
         self._build_ui()
 
+        # Drop overlay (created after _build_ui so it sits on top)
+        self._drop_overlay = DropOverlayWidget(self)
+
         # Switch to settings page (where the user just changed the theme)
         self.settingsPage.load_from_settings()
         self.centralStack.setCurrentIndex(2)
@@ -1238,6 +1260,41 @@ class MainWindow(QMainWindow):
         cache = iTunesDBCache.get_instance()
         if cache.get_tracks():
             self.onDataReady()
+
+    def _onCategoryChanged(self, category: str):
+        """Handle sidebar category selection — switch to music browser and update category."""
+        # Switch panel back to music browser if Plex was active
+        if self._panel_stack.currentIndex() != 0:
+            self._panel_stack.setCurrentIndex(0)
+        self.sidebar.set_plex_active(False)
+        self.musicBrowser.updateCategory(category)
+
+    def _onPlexLibraryClicked(self):
+        """Handle sidebar Plex Library click — switch to Plex browser panel."""
+        self.sidebar.set_plex_active(True)
+        self._panel_stack.setCurrentIndex(1)
+
+        if not self._plex_connected:
+            self._plex_connected = self._connect_plex_lazy()
+
+    def _connect_plex_lazy(self) -> bool:
+        """Load .env config and attempt to connect to Plex (called once)."""
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except ImportError:
+            logger.debug("python-dotenv not installed — .env not loaded")
+
+        plex_url = os.getenv("PLEX_URL", "")
+        plex_token = os.getenv("PLEX_TOKEN", "")
+        plex_library_name = os.getenv("PLEX_LIBRARY", None)
+
+        config = {
+            "url": plex_url,
+            "token": plex_token,
+            "library_name": plex_library_name,
+        }
+        return self.plexBrowser.connect_plex(config)
 
     def selectDevice(self):
         """Open device picker dialog to scan and select an iPod."""

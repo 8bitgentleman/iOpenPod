@@ -470,6 +470,7 @@ class DeviceInfoCard(QFrame):
 class Sidebar(QFrame):
     category_changed = pyqtSignal(str)
     device_renamed = pyqtSignal(str)  # emits new iPod name
+    plex_library_clicked = pyqtSignal()
 
     # Categories that only make sense on video-capable iPods
     _VIDEO_CATEGORIES = frozenset({"Videos", "Movies", "TV Shows", "Music Videos"})
@@ -597,6 +598,32 @@ class Sidebar(QFrame):
 
         self.sidebarLayout.addWidget(make_separator())
 
+        # Plex section label
+        plex_label = QLabel("PLEX")
+        plex_label.setFont(QFont(FONT_FAMILY, 9, QFont.Weight.Bold))
+        plex_label.setStyleSheet(f"color: {Colors.TEXT_TERTIARY}; background: transparent; padding-left: 4px;")
+        self.sidebarLayout.addWidget(plex_label)
+
+        # Plex Library button
+        self.plexButton = QPushButton("☁ Plex Library")
+        self.plexButton.setFont(QFont(FONT_FAMILY, 11, QFont.Weight.DemiBold))
+        self.plexButton.setStyleSheet(sidebar_nav_css())
+        self.plexButton.clicked.connect(self.plex_library_clicked)
+        self.sidebarLayout.addWidget(self.plexButton)
+
+        # Plex download progress label (hidden by default)
+        self._plex_progress_label = QLabel()
+        self._plex_progress_label.setFont(QFont(FONT_FAMILY, 9))
+        self._plex_progress_label.setStyleSheet(
+            f"color: {Colors.ACCENT}; background: transparent; padding-left: 14px;"
+        )
+        self._plex_progress_label.hide()
+        self.sidebarLayout.addWidget(self._plex_progress_label)
+
+        self._plex_active = False
+
+        self.sidebarLayout.addWidget(make_separator())
+
         # Settings button at bottom
         self.settingsButton = QPushButton("Settings")
         self.settingsButton.setFont(QFont(FONT_FAMILY, Metrics.FONT_LG))
@@ -684,6 +711,12 @@ class Sidebar(QFrame):
 
     def selectCategory(self, category):
         self._style_nav_btn(self.selectedCategory, selected=False)
+
+        # If Plex was active, de-highlight it
+        if getattr(self, '_plex_active', False):
+            self._plex_active = False
+            self.plexButton.setStyleSheet(sidebar_nav_css())
+
         self.selectedCategory = category
         self._style_nav_btn(category, selected=True)
         self.category_changed.emit(category)
@@ -697,3 +730,23 @@ class Sidebar(QFrame):
             icon = glyph_icon(icon_name, scaled(20), color)
             if icon:
                 btn.setIcon(icon)
+
+    def set_plex_active(self, active: bool):
+        """Highlight the Plex button when active; restore normal style otherwise."""
+        self._plex_active = active
+        if active:
+            # De-highlight the currently selected library category button
+            self._style_nav_btn(self.selectedCategory, selected=False)
+            self.plexButton.setStyleSheet(sidebar_nav_selected_css())
+        else:
+            self.plexButton.setStyleSheet(sidebar_nav_css())
+            # Re-highlight the currently selected library category
+            self._style_nav_btn(self.selectedCategory, selected=True)
+
+    def set_plex_download_progress(self, current: int, total: int):
+        """Show or hide the download progress label below the Plex button."""
+        if total > 0:
+            self._plex_progress_label.setText(f"↓ Downloading… ({current}/{total})")
+            self._plex_progress_label.show()
+        else:
+            self._plex_progress_label.hide()
