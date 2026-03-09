@@ -291,6 +291,8 @@ class PlexLibrary:
 
         rating_key = str(plex_track.ratingKey)
         tmp_path = Path(f"/tmp/iopenpod_plex_{rating_key}.{ext}")
+        # Always start fresh — stale partials from previous sessions cause 416s
+        tmp_path.unlink(missing_ok=True)
 
         last_exc: Exception = RuntimeError("No attempts made")
         for attempt in range(max_retries):
@@ -409,23 +411,13 @@ class PlexLibrary:
         response = requests.get(
             url,
             headers={"X-Plex-Token": token},
-            stream=True,
-            timeout=60,
+            stream=False,  # load full response; avoids urllib3 IncompleteRead on wrong Content-Length
+            timeout=(10, 120),
         )
         response.raise_for_status()
 
-        total_size = int(response.headers.get("Content-Length", 0))
-        bytes_downloaded = 0
+        data = response.content
+        dest.write_bytes(data)
 
-        with open(dest, "wb") as fh:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    fh.write(chunk)
-                    bytes_downloaded += len(chunk)
-                    if progress_callback is not None:
-                        progress_callback(bytes_downloaded, total_size)
-
-        if total_size and bytes_downloaded < total_size:
-            raise PlexDownloadError(
-                f"Incomplete download: got {bytes_downloaded} of {total_size} bytes"
-            )
+        if progress_callback is not None:
+            progress_callback(len(data), len(data))

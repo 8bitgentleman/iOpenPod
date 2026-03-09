@@ -1227,8 +1227,8 @@ class MainWindow(QMainWindow):
         # Forward Plex download progress to sidebar
         self.plexBrowser.download_progress.connect(self.sidebar.set_plex_download_progress)
 
-        # Wire Plex sync button to the existing sync flow
-        self.plexBrowser.sync_requested.connect(self.startPCSync)
+        # Wire Plex sync button to the Plex-specific sync flow
+        self.plexBrowser.sync_requested.connect(self.startPlexSync)
 
     def _on_theme_changed(self):
         """Rebuild the entire UI after a live theme switch."""
@@ -1634,6 +1634,53 @@ class MainWindow(QMainWindow):
             ipod_path=device_manager.device_path or "",
             supports_video=supports_video,
             supports_podcast=supports_podcast,
+        )
+        self._sync_worker.progress.connect(self.syncReview.update_progress)
+        self._sync_worker.finished.connect(self._onSyncDiffComplete)
+        self._sync_worker.error.connect(self._onSyncError)
+        self._sync_worker.start()
+
+    @pyqtSlot()
+    def startPlexSync(self):
+        """Sync already-downloaded Plex tracks to iPod (no folder dialog)."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        device = DeviceManager.get_instance()
+        if not device.device_path:
+            QMessageBox.warning(self, "No Device", "Please select an iPod device first.")
+            return
+
+        plex_tracks = list(self.plexBrowser.get_downloaded_tracks().values())
+        if not plex_tracks:
+            QMessageBox.warning(self, "No Tracks", "No Plex tracks have been downloaded yet.")
+            return
+
+        self.centralStack.setCurrentIndex(1)
+        self.syncReview.show_loading()
+
+        cache = iTunesDBCache.get_instance()
+        ipod_tracks = cache.get_tracks()
+
+        supports_video = False
+        supports_podcast = True
+        try:
+            from device_info import get_current_device
+            from ipod_models import capabilities_for_family_gen
+            dev = get_current_device()
+            if dev and dev.model_family and dev.generation:
+                caps = capabilities_for_family_gen(dev.model_family, dev.generation)
+                supports_video = bool(caps and caps.supports_video)
+                supports_podcast = bool(caps and caps.supports_podcast)
+        except Exception:
+            pass
+
+        self._sync_worker = SyncWorker(
+            pc_folder="",
+            ipod_tracks=ipod_tracks,
+            ipod_path=device.device_path or "",
+            supports_video=supports_video,
+            supports_podcast=supports_podcast,
+            plex_tracks=plex_tracks,
         )
         self._sync_worker.progress.connect(self.syncReview.update_progress)
         self._sync_worker.finished.connect(self._onSyncDiffComplete)

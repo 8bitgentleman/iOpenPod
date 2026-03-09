@@ -239,6 +239,9 @@ class PlexBrowser(QWidget):
     sync_requested = pyqtSignal()
     download_progress = pyqtSignal(int, int)  # (current, total)
 
+    # Plex drops connections when hit with too many concurrent streams.
+    _MAX_CONCURRENT_DOWNLOADS = 2
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._plex_library = None
@@ -257,6 +260,11 @@ class PlexBrowser(QWidget):
         self._current_album = None
         # cached track list for the current album page (avoids re-fetching on status update)
         self._current_album_tracks: list = []
+
+        # Dedicated pool so download concurrency doesn't affect the global pool
+        # and we can throttle it to avoid overwhelming the Plex server.
+        self._download_pool = QThreadPool()
+        self._download_pool.setMaxThreadCount(self._MAX_CONCURRENT_DOWNLOADS)
 
         self._build_ui()
 
@@ -848,7 +856,7 @@ class PlexBrowser(QWidget):
         )
         worker.signals.finished.connect(self._on_download_finished)
         worker.signals.failed.connect(self._on_download_failed)
-        QThreadPool.globalInstance().start(worker)
+        self._download_pool.start(worker)
 
     def _on_download_started(self, plex_rating_key: str):
         self._download_status[plex_rating_key] = "downloading"
@@ -961,7 +969,7 @@ class PlexBrowser(QWidget):
                 )
                 worker.signals.finished.connect(self._on_download_finished)
                 worker.signals.failed.connect(self._on_download_failed)
-                QThreadPool.globalInstance().start(worker)
+                self._download_pool.start(worker)
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 

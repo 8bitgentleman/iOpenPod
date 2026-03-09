@@ -744,9 +744,12 @@ class Sidebar(QFrame):
             self._style_nav_btn(self.selectedCategory, selected=True)
 
     def set_plex_download_progress(self, current: int, total: int):
-        """Show or hide the download progress label below the Plex button."""
-        if total > 0:
-            self._plex_progress_label.setText(f"↓ Downloading… ({current}/{total})")
+        """Show download progress / ready state below the Plex button."""
+        if total == 0:
+            self._plex_progress_label.hide()
+        elif current >= total:
+            self._plex_progress_label.setText(f"✓ Ready to sync ({current}/{total})")
             self._plex_progress_label.show()
         else:
-            self._plex_progress_label.hide()
+            self._plex_progress_label.setText(f"↓ Downloading… ({current}/{total})")
+            self._plex_progress_label.show()

@@ -33,6 +33,19 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+class _PlexLibraryProxy:
+    """Thin PCLibrary-compatible wrapper around pre-downloaded Plex PCTrack objects."""
+
+    def __init__(self, tracks: list):
+        self._tracks = tracks
+
+    def scan(self, **_kwargs):
+        return iter(self._tracks)
+
+    def count_audio_files(self, **_kwargs) -> int:
+        return len(self._tracks)
+
+
 class SyncWorker(QThread):
     """Background worker for computing sync diff."""
     progress = pyqtSignal(str, int, int, str)  # stage, current, total, message
@@ -40,18 +53,23 @@ class SyncWorker(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, pc_folder: str, ipod_tracks: list, ipod_path: str = "",
-                 supports_video: bool = True, supports_podcast: bool = True):
+                 supports_video: bool = True, supports_podcast: bool = True,
+                 plex_tracks: list | None = None):
         super().__init__()
         self.pc_folder = pc_folder
         self.ipod_tracks = ipod_tracks
         self.ipod_path = ipod_path
         self.supports_video = supports_video
         self.supports_podcast = supports_podcast
+        self.plex_tracks = plex_tracks  # when set, bypass folder scan
 
     def run(self):
         try:
-            # Initialize PC library scanner
-            pc_library = PCLibrary(self.pc_folder)
+            # Use pre-downloaded Plex tracks or scan a local folder
+            if self.plex_tracks is not None:
+                pc_library = _PlexLibraryProxy(self.plex_tracks)
+            else:
+                pc_library = PCLibrary(self.pc_folder)
 
             # Create fingerprint-based diff engine
             diff_engine = FingerprintDiffEngine(
