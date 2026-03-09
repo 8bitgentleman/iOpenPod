@@ -1281,7 +1281,7 @@ class MainWindow(QMainWindow):
         """Load .env config and attempt to connect to Plex (called once)."""
         try:
             from dotenv import load_dotenv
-            load_dotenv()
+            load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
         except ImportError:
             logger.debug("python-dotenv not installed — .env not loaded")
 
