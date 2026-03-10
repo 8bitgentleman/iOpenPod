@@ -388,11 +388,56 @@ class SyncExecutor:
             except Exception as e:
                 logger.debug("No GUI cache available (headless sync?): %s", e)
 
+            # ── Build title/album/artist → dbid lookup for Plex playlists ─
+            _taa_to_dbid: dict[tuple, int] = {}
+            for _t in all_tracks:
+                _key = (
+                    (_t.title or "").lower(),
+                    (_t.album or "").lower(),
+                    (_t.artist or "").lower(),
+                )
+                if _t.dbid and _key[0]:
+                    _taa_to_dbid[_key] = _t.dbid
+
+            # ── Inject Plex playlists ──────────────────────────────────
+            _plex_playlist_infos: list[PlaylistInfo] = []
+            try:
+                from GUI.app import iTunesDBCache as _DBCache
+                _plex_pls = _DBCache.get_instance().get_plex_playlists()
+                for _ppl in _plex_pls:
+                    _name = _ppl.get("name", "Plex Playlist")
+                    _track_ids = []
+                    for _tk in _ppl.get("track_keys", []):
+                        _k = (
+                            (_tk[0] or "").lower(),
+                            (_tk[1] or "").lower(),
+                            (_tk[2] or "").lower(),
+                        )
+                        _dbid = _taa_to_dbid.get(_k)
+                        if _dbid:
+                            _track_ids.append(_dbid)
+                    if _track_ids:
+                        _plex_playlist_infos.append(PlaylistInfo(
+                            name=_name,
+                            track_ids=_track_ids,
+                            master=False,
+                        ))
+                        logger.info(
+                            "Plex playlist '%s': %d tracks resolved",
+                            _name, len(_track_ids),
+                        )
+            except Exception as _e:
+                logger.debug("No Plex playlists to inject: %s", _e)
+
             # ── Build playlists and evaluate smart playlists ──────────
             master_playlist_name, playlists, smart_playlists = self._build_and_evaluate_playlists(
                 existing_tracks_data, all_tracks,
                 existing_playlists_raw, existing_smart_raw,
             )
+
+            # Append Plex playlists to the regular playlist list
+            if _plex_playlist_infos:
+                playlists.extend(_plex_playlist_infos)
 
             # Always write — even if all_tracks is empty (e.g. all tracks
             # were removed).  Skipping the write would leave the old DB
@@ -445,6 +490,9 @@ class SyncExecutor:
                     if gui_cache.has_pending_playlists():
                         gui_cache._user_playlists.clear()
                         logger.info("Cleared pending user playlists after successful write")
+                    if gui_cache.get_plex_playlists():
+                        gui_cache.clear_plex_playlists()
+                        logger.info("Cleared pending Plex playlists after successful write")
                     if gui_cache.has_pending_track_edits():
                         gui_cache.clear_track_edits()
                         logger.info("Cleared pending track flag edits after successful write")

@@ -372,6 +372,8 @@ class iTunesDBCache(QObject):
         self._track_id_index: dict | None = None  # trackID -> track dict
         # User-created/edited playlists (persisted in memory until sync)
         self._user_playlists: list[dict] = []
+        # Plex playlists to inject at sync time
+        self._plex_playlists: list[dict] = []
         # Pending track flag edits: dbid -> { field: (original, new), ... }
         # Originals are captured on first edit so the diff engine can
         # revert in-memory track dicts before comparing.
@@ -395,6 +397,7 @@ class iTunesDBCache(QObject):
             self._genre_index = None
             self._track_id_index = None
             self._user_playlists.clear()
+            self._plex_playlists.clear()
             self._track_edits.clear()
 
     def invalidate(self):
@@ -596,6 +599,21 @@ class iTunesDBCache(QObject):
         """Check if there are user playlists waiting to be synced."""
         with self._lock:
             return len(self._user_playlists) > 0
+
+    def set_plex_playlists(self, playlists: list[dict]) -> None:
+        """Store Plex playlists to be created on iPod at next sync."""
+        with self._lock:
+            self._plex_playlists = list(playlists)
+
+    def get_plex_playlists(self) -> list[dict]:
+        """Get pending Plex playlists."""
+        with self._lock:
+            return list(self._plex_playlists)
+
+    def clear_plex_playlists(self) -> None:
+        """Clear pending Plex playlists after sync."""
+        with self._lock:
+            self._plex_playlists.clear()
 
     # ─────────────────────────────────────────────────────────────
     # Track flag edits (in-memory, applied at sync time)
@@ -1092,6 +1110,7 @@ class MainWindow(QMainWindow):
         self._sync_worker = None
         self._sync_execute_worker = None
         self._plan = None
+        self._is_plex_sync = False
 
         # Initialize system notifications
         self._notifier = Notifier.get_instance(self)
@@ -1655,6 +1674,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Tracks", "No Plex tracks have been downloaded yet.")
             return
 
+        self._is_plex_sync = True
         self.centralStack.setCurrentIndex(1)
         self.syncReview.show_loading()
 
@@ -1745,6 +1765,21 @@ class MainWindow(QMainWindow):
         # ── Populate playlist change info on the plan ──────────────
         self._populate_playlist_changes(plan, cache)
 
+        # Inject Plex playlists if this is a Plex sync
+        if self._is_plex_sync:
+            plex_pls = self.plexBrowser.get_plex_playlists_for_sync()
+            if plex_pls:
+                import time
+                cache.set_plex_playlists(plex_pls)
+                # Also add to plan for display in the sync review UI
+                for ppl in plex_pls:
+                    plan.playlists_to_add.append({
+                        "Title": ppl["name"],
+                        "_isNew": True,
+                        "_isPlex": True,
+                        "playlistID": abs(hash(ppl["name"])) & 0xFFFFFFFF,
+                    })
+
         self.syncReview.show_plan(plan)
 
     def _populate_playlist_changes(self, plan, cache: 'iTunesDBCache'):
@@ -1794,6 +1829,7 @@ class MainWindow(QMainWindow):
         if self._sync_execute_worker is not None and self._sync_execute_worker.isRunning():
             self._sync_execute_worker.requestInterruption()
         self.centralStack.setCurrentIndex(0)
+        self._is_plex_sync = False
 
     def showSettings(self):
         """Show the settings page."""
@@ -1888,6 +1924,11 @@ class MainWindow(QMainWindow):
         self._disconnect_skip_signal()
         # Show styled results view instead of a plain message box
         self.syncReview.show_result(result)
+
+        # Clean up Plex temp files after a successful Plex sync
+        if self._is_plex_sync:
+            self._is_plex_sync = False
+            self.plexBrowser.cleanup_downloaded_files()
 
         # Desktop notification if app is not focused
         if not self.isActiveWindow():

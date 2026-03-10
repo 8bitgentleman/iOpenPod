@@ -188,6 +188,10 @@ class PlexLibrary:
             return []
         return [p for p in all_playlists if p.playlistType == "audio"]
 
+    def get_all_albums(self) -> list:
+        """Return all albums in the music library."""
+        return self._music_section.albums()
+
     def get_playlist_tracks(self, playlist_rating_key: str) -> list:
         """Return all tracks in the given playlist."""
         playlist = self._server.fetchItem(int(playlist_rating_key))
@@ -296,8 +300,12 @@ class PlexLibrary:
 
         last_exc: Exception = RuntimeError("No attempts made")
         for attempt in range(max_retries):
+            # Always start each attempt with a clean file so stale partials
+            # don't confuse the server or leave garbage on disk.
+            tmp_path.unlink(missing_ok=True)
+
             if attempt > 0:
-                sleep_secs = 2 ** (attempt - 1)  # 0s first, 2s, 4s
+                sleep_secs = 2 ** attempt  # 2s, 4s, 8s, …
                 logger.debug(
                     "Retry %d/%d for track %r — sleeping %ds",
                     attempt,
@@ -323,12 +331,13 @@ class PlexLibrary:
                 f"Failed to download {plex_track.title!r} after {max_retries} attempts: {last_exc}"
             ) from last_exc
 
-        # Build artwork hash (best-effort)
+        # Build artwork hash (best-effort) and embed into file
         art_hash: Optional[str] = None
         try:
             art_bytes = self.get_artwork(plex_track)
             if art_bytes:
                 art_hash = hashlib.md5(art_bytes).hexdigest()
+                self._embed_artwork_in_file(tmp_path, ext, art_bytes)
         except Exception as exc:
             logger.debug("Art hash failed for %r: %s", plex_track.title, exc)
 
@@ -393,6 +402,46 @@ class PlexLibrary:
             needs_transcoding=needs_tc,
         )
 
+    def _embed_artwork_in_file(self, dest: Path, ext: str, art_bytes: bytes) -> None:
+        """Embed artwork bytes into the downloaded temp file using mutagen."""
+        try:
+            if ext.lower() == "mp3":
+                from mutagen.id3 import ID3, APIC, ID3NoHeaderError
+                try:
+                    tags = ID3(str(dest))
+                except ID3NoHeaderError:
+                    tags = ID3()
+                tags.delall("APIC")
+                tags.add(APIC(
+                    encoding=3,
+                    mime="image/jpeg",
+                    type=3,
+                    desc="Cover",
+                    data=art_bytes,
+                ))
+                tags.save(str(dest))
+            elif ext.lower() in ("m4a", "m4b", "aac", "alac", "mp4", "m4v"):
+                from mutagen.mp4 import MP4, MP4Cover
+                audio = MP4(str(dest))
+                if audio.tags is None:
+                    audio.add_tags()
+                audio.tags["covr"] = [
+                    MP4Cover(art_bytes, imageformat=MP4Cover.FORMAT_JPEG)
+                ]
+                audio.save()
+            elif ext.lower() == "flac":
+                from mutagen.flac import FLAC, Picture
+                audio = FLAC(str(dest))
+                audio.clear_pictures()
+                pic = Picture()
+                pic.type = 3
+                pic.mime = "image/jpeg"
+                pic.data = art_bytes
+                audio.add_picture(pic)
+                audio.save()
+        except Exception as exc:
+            logger.debug("Could not embed artwork into %s: %s", dest, exc)
+
     # ------------------------------------------------------------------
     # Private streaming helper
     # ------------------------------------------------------------------
@@ -404,20 +453,62 @@ class PlexLibrary:
         dest: Path,
         progress_callback: "Callable[[int, int], None] | None",
     ) -> None:
-        """Stream a media part to *dest*, calling progress_callback(bytes_done, total)."""
+        """Stream a media part to *dest*, calling progress_callback(bytes_done, total).
+
+        Uses chunked streaming so the connection is properly closed before any
+        retry attempt.  If Plex sends a wrong Content-Length and drops the
+        connection early, we accept the partial response as long as it is ≥ 95%
+        of the declared size (the audio data is complete; only the header
+        length was wrong).
+        """
         url = self._server.url(part.key)
         token = self._server._token
 
-        response = requests.get(
+        chunks: list[bytes] = []
+        total_read = 0
+        declared_size = part.size or 0
+
+        # Use a context manager so the underlying socket is closed (and thus
+        # fully released) before any retry, preventing the next attempt from
+        # inheriting a broken connection.
+        with requests.get(
             url,
             headers={"X-Plex-Token": token},
-            stream=False,  # load full response; avoids urllib3 IncompleteRead on wrong Content-Length
-            timeout=(10, 120),
-        )
-        response.raise_for_status()
+            stream=True,
+            timeout=(10, 300),
+        ) as response:
+            response.raise_for_status()
 
-        data = response.content
+            incomplete_exc: Optional[Exception] = None
+            try:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        chunks.append(chunk)
+                        total_read += len(chunk)
+                        if progress_callback is not None:
+                            progress_callback(total_read, declared_size or total_read)
+            except Exception as exc:
+                # Connection dropped mid-transfer.  Keep what we have and
+                # decide below whether it is usable.
+                incomplete_exc = exc
+
+        data = b"".join(chunks)
+
+        if incomplete_exc is not None:
+            # Accept the data only if we received at least 95% of the
+            # declared file size — covers Plex servers that report a larger
+            # Content-Length than the actual bytes they send.
+            if not data:
+                raise incomplete_exc
+            if declared_size > 0 and total_read < declared_size * 0.95:
+                raise incomplete_exc
+            logger.debug(
+                "Accepted partial download for %r: %d/%d bytes (%.1f%%)",
+                plex_track.title, total_read, declared_size,
+                100.0 * total_read / declared_size if declared_size else 100.0,
+            )
+
         dest.write_bytes(data)
 
         if progress_callback is not None:
-            progress_callback(len(data), len(data))
+            progress_callback(total_read, total_read)

@@ -260,6 +260,8 @@ class PlexBrowser(QWidget):
         self._current_album = None
         # cached track list for the current album page (avoids re-fetching on status update)
         self._current_album_tracks: list = []
+        # plex_rating_key → plex playlist object (for enabled playlists)
+        self._synced_playlist_objs: dict[str, object] = {}
 
         # Dedicated pool so download concurrency doesn't affect the global pool
         # and we can throttle it to avoid overwhelming the Plex server.
@@ -344,6 +346,10 @@ class PlexBrowser(QWidget):
         self._playlist_page, self._playlist_list = self._build_playlist_page()
         self._content.addWidget(self._playlist_page)
 
+        # Page 4: All albums grid
+        self._all_albums_page, self._all_albums_grid_layout = self._build_all_albums_page()
+        self._content.addWidget(self._all_albums_page)
+
         root.addWidget(self._content, stretch=1)
 
         # ── Bottom tab bar ───────────────────────────────────────────────────
@@ -355,6 +361,12 @@ class PlexBrowser(QWidget):
         self._tab_library.setCheckable(True)
         self._tab_library.setChecked(True)
         self._tab_library.clicked.connect(self._on_tab_library)
+
+        self._tab_albums = QPushButton("Albums")
+        self._tab_albums.setFont(QFont(FONT_FAMILY, 10, QFont.Weight.DemiBold))
+        self._tab_albums.setCheckable(True)
+        self._tab_albums.setChecked(False)
+        self._tab_albums.clicked.connect(self._on_tab_albums)
 
         self._tab_playlists = QPushButton("Playlists")
         self._tab_playlists.setFont(QFont(FONT_FAMILY, 10, QFont.Weight.DemiBold))
@@ -380,10 +392,12 @@ class PlexBrowser(QWidget):
         self._tab_css_active = _tab_css_active
         self._tab_css_idle = _tab_css_idle
         self._tab_library.setStyleSheet(_tab_css_active)
+        self._tab_albums.setStyleSheet(_tab_css_idle)
         self._tab_playlists.setStyleSheet(_tab_css_idle)
 
         tab_row.addStretch()
         tab_row.addWidget(self._tab_library)
+        tab_row.addWidget(self._tab_albums)
         tab_row.addWidget(self._tab_playlists)
         tab_row.addStretch()
 
@@ -416,6 +430,31 @@ class PlexBrowser(QWidget):
         return page
 
     def _build_album_page(self) -> tuple[QWidget, QGridLayout]:
+        page = QWidget()
+        page.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            + scrollbar_css()
+        )
+
+        container = QWidget()
+        container.setStyleSheet("background: transparent;")
+        grid = QGridLayout(container)
+        grid.setContentsMargins(4, 4, 4, 4)
+        grid.setSpacing(Metrics.GRID_SPACING)
+
+        scroll.setWidget(container)
+        layout.addWidget(scroll)
+        return page, grid
+
+    def _build_all_albums_page(self) -> tuple[QWidget, QGridLayout]:
         page = QWidget()
         page.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(page)
@@ -528,8 +567,10 @@ class PlexBrowser(QWidget):
 
     def _on_tab_library(self):
         self._tab_library.setStyleSheet(self._tab_css_active)
+        self._tab_albums.setStyleSheet(self._tab_css_idle)
         self._tab_playlists.setStyleSheet(self._tab_css_idle)
         self._tab_library.setChecked(True)
+        self._tab_albums.setChecked(False)
         self._tab_playlists.setChecked(False)
         # Return to artist list (top of library nav)
         self._nav_stack.clear()
@@ -538,10 +579,61 @@ class PlexBrowser(QWidget):
     def _on_tab_playlists(self):
         self._tab_playlists.setStyleSheet(self._tab_css_active)
         self._tab_library.setStyleSheet(self._tab_css_idle)
+        self._tab_albums.setStyleSheet(self._tab_css_idle)
         self._tab_playlists.setChecked(True)
         self._tab_library.setChecked(False)
+        self._tab_albums.setChecked(False)
         self._nav_stack.clear()
         self._show_playlists()
+
+    def _on_tab_albums(self):
+        self._tab_albums.setStyleSheet(self._tab_css_active)
+        self._tab_library.setStyleSheet(self._tab_css_idle)
+        self._tab_playlists.setStyleSheet(self._tab_css_idle)
+        self._tab_albums.setChecked(True)
+        self._tab_library.setChecked(False)
+        self._tab_playlists.setChecked(False)
+        self._nav_stack.clear()
+        self._show_all_albums()
+
+    def _show_all_albums(self):
+        """Load and display all albums directly (Page 4)."""
+        # Clear grid
+        while self._all_albums_grid_layout.count():
+            item = self._all_albums_grid_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not self._connected or self._plex_library is None:
+            self._nav_stack.clear()
+            self._nav_stack.append((4, "All Albums"))
+            self._content.setCurrentIndex(4)
+            self._breadcrumb.setText("All Albums")
+            self._back_btn.setVisible(False)
+            return
+
+        try:
+            albums = self._plex_library.get_all_albums()
+        except Exception as exc:
+            log.exception("Failed to load all albums")
+            self._show_error(f"Failed to load albums — {exc}")
+            return
+
+        cols = max(1, 4)
+        for idx, album in enumerate(albums):
+            card = _AlbumCard(album)
+            card.clicked.connect(self._show_tracks)
+            self._all_albums_grid_layout.addWidget(card, idx // cols, idx % cols)
+
+        self._all_albums_grid_layout.setRowStretch(
+            (len(albums) // cols) + 1, 1
+        )
+
+        self._nav_stack.clear()
+        self._nav_stack.append((4, "All Albums"))
+        self._content.setCurrentIndex(4)
+        self._breadcrumb.setText("All Albums")
+        self._back_btn.setVisible(False)
 
     # ── Navigation ───────────────────────────────────────────────────────────
 
@@ -615,6 +707,8 @@ class PlexBrowser(QWidget):
             self._show_tracks(self._current_album)
         elif current == 3:
             self._show_playlists()
+        elif current == 4:
+            self._show_all_albums()
 
     # ── Page builders ────────────────────────────────────────────────────────
 
@@ -939,11 +1033,12 @@ class PlexBrowser(QWidget):
         currently_enabled = self._synced_playlists.get(pl_key, False)
         self._synced_playlists[pl_key] = not currently_enabled
         if not currently_enabled:
-            # Toggling ON — add all tracks to selected keys and queue downloads
+            # Toggling ON — store the playlist object and queue downloads
+            self._synced_playlist_objs[pl_key] = pl
             self._enable_playlist(pl)
         else:
-            # Toggling OFF — remove from synced list (tracks remain until sync diff)
-            pass
+            # Toggling OFF — remove from synced list and objects
+            self._synced_playlist_objs.pop(pl_key, None)
         # Refresh the playlist view
         self._show_playlists()
         self._update_sync_button()
@@ -1017,3 +1112,49 @@ class PlexBrowser(QWidget):
     def get_synced_playlist_keys(self) -> list[str]:
         """Return playlist ratingKeys enabled for sync."""
         return [k for k, v in self._synced_playlists.items() if v]
+
+    def get_plex_playlists_for_sync(self) -> list[dict]:
+        """Return playlist data for enabled playlists, resolved to downloaded track keys.
+
+        Returns a list of dicts: {"name": str, "track_keys": [(title, album, artist), ...]}
+        Only includes playlists that have at least one downloaded track.
+        """
+        result = []
+        for pl_key, pl in self._synced_playlist_objs.items():
+            if not self._synced_playlists.get(pl_key, False):
+                continue
+            name = getattr(pl, "title", str(pl))
+            track_keys = []
+            try:
+                tracks = pl.items()
+            except Exception:
+                continue
+            for track in tracks:
+                rating_key = str(track.ratingKey)
+                pc_track = self._downloaded_tracks.get(rating_key)
+                if pc_track is not None:
+                    track_keys.append((
+                        getattr(pc_track, "title", "") or "",
+                        getattr(pc_track, "album", "") or "",
+                        getattr(pc_track, "artist", "") or "",
+                    ))
+            if track_keys:
+                result.append({"name": name, "track_keys": track_keys})
+        return result
+
+    def cleanup_downloaded_files(self) -> None:
+        """Delete temp files for all downloaded Plex tracks and reset state."""
+        import os
+        for pc_track in self._downloaded_tracks.values():
+            try:
+                path = getattr(pc_track, "path", None)
+                if path and os.path.exists(path):
+                    os.unlink(path)
+            except Exception as exc:
+                log.debug("Could not delete plex temp file: %s", exc)
+        self._downloaded_tracks.clear()
+        self._download_status.clear()
+        self._checked_tracks.clear()
+        self._synced_playlists.clear()
+        self._synced_playlist_objs.clear()
+        self._update_sync_button()
