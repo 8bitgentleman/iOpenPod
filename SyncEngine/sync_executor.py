@@ -13,6 +13,7 @@ The database is always fully rewritten (not patched incrementally).
 """
 
 import base64
+import errno
 import logging
 import shutil
 import threading
@@ -46,6 +47,11 @@ logger = logging.getLogger(__name__)
 
 class _OutOfSpaceError(Exception):
     """Raised when iPod disk space drops below the 30 MB safety reserve."""
+    pass
+
+
+class _DeviceDisconnectedError(Exception):
+    """Raised when the iPod device becomes unavailable mid-sync (ENXIO)."""
     pass
 
 
@@ -303,6 +309,30 @@ class SyncExecutor:
 
         # ===== Stage 7: Write database (one shot) =====
         if not dry_run:
+            # Re-check device writability — it may have gone read-only mid-sync
+            # (e.g. macOS remounts FAT32 read-only after ENXIO I/O errors).
+            import tempfile as _tempfile
+            _probe_dir = self.ipod_path / "iPod_Control" / "iTunes"
+            try:
+                _fd, _probe_path = _tempfile.mkstemp(
+                    prefix=".iOpenPod_write_test_", dir=str(_probe_dir)
+                )
+                import os as _os
+                _os.close(_fd)
+                _os.unlink(_probe_path)
+            except OSError as _e:
+                if _e.errno in (errno.EROFS, errno.EACCES, errno.EPERM, errno.ENXIO):
+                    msg = (
+                        f"iPod is no longer writable before database write ({_e}). "
+                        "The device may have disconnected or been remounted read-only."
+                    )
+                    logger.error(msg)
+                    result.errors.append(("device", msg))
+                    result.success = False
+                    return result
+                else:
+                    logger.warning("Pre-DB write probe failed (non-fatal): %s", _e)
+
             if progress_callback:
                 progress_callback(SyncProgress("write_database", 0, 1, message="Writing database..."))
 
@@ -728,6 +758,13 @@ class SyncExecutor:
                     for f in future_to_idx:
                         f.cancel()
                     return
+                except _DeviceDisconnectedError as e:
+                    logger.error(str(e))
+                    result.errors.append(("device", str(e)))
+                    result.success = False
+                    for f in future_to_idx:
+                        f.cancel()
+                    return
                 except Exception as e:
                     item = plan.to_update_file[idx]
                     result.errors.append((item.description, f"Worker error: {e}"))
@@ -1050,6 +1087,13 @@ class SyncExecutor:
                 except _OutOfSpaceError as e:
                     logger.error(str(e))
                     result.errors.append(("storage", str(e)))
+                    result.success = False
+                    for f in future_to_idx:
+                        f.cancel()
+                    return
+                except _DeviceDisconnectedError as e:
+                    logger.error(str(e))
+                    result.errors.append(("device", str(e)))
                     result.success = False
                     for f in future_to_idx:
                         f.cancel()
@@ -1432,8 +1476,27 @@ class SyncExecutor:
             try:
                 shutil.copyfile(source_path, dest_path)
                 return True, dest_path, False, ""
+            except OSError as e:
+                logger.error(f"Copy failed: {e}")
+                # Clean up any partial file left by the failed write
+                try:
+                    if dest_path.exists():
+                        dest_path.unlink()
+                except Exception:
+                    pass
+                if e.errno == errno.ENXIO:
+                    raise _DeviceDisconnectedError(
+                        f"iPod device became unavailable mid-copy (ENXIO). "
+                        f"Check the USB connection and try again."
+                    ) from e
+                return False, None, False, str(e)
             except Exception as e:
                 logger.error(f"Copy failed: {e}")
+                try:
+                    if dest_path.exists():
+                        dest_path.unlink()
+                except Exception:
+                    pass
                 return False, None, False, str(e)
 
     def _delete_from_ipod(self, ipod_path: str | Path) -> bool:
