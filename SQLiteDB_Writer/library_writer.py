@@ -632,6 +632,21 @@ def write_library_itdb(
     # all unique sort keys, sort alphabetically, assign rank = (pos+1)*100.
     orders = _compute_sort_orders(tracks)
 
+    # ── Collect categories (for podcasts) ─────────────────────────────
+    category_map: dict[str, int] = {}    # category_name → category_id
+    category_id_counter = 1
+    for track in tracks:
+        cat = track.category or ""
+        if cat and cat not in category_map:
+            category_map[cat] = category_id_counter
+            category_id_counter += 1
+
+    for cat_name, cat_id in category_map.items():
+        cur.execute(
+            "INSERT INTO category_map (id, category) VALUES (?, ?)",
+            (cat_id, cat_name)
+        )
+
     # ── Collect genres ─────────────────────────────────────────────────
     genre_map: dict[str, int] = {}    # genre_name → genre_id
     genre_id_counter = 1
@@ -721,6 +736,7 @@ def write_library_itdb(
     album_has_compilation: dict[tuple[str, str], bool] = {}
     album_artist_pids: dict[tuple[str, str], int] = {}
     album_artwork_pids: dict[tuple[str, str], int] = {}
+    album_feed_urls: dict[tuple[str, str], str] = {}
 
     for track in tracks:
         album_name = track.album or ""
@@ -736,6 +752,9 @@ def write_library_itdb(
         # Store artwork item pid (first track in album with artwork)
         if track.mhii_link and key not in album_artwork_pids:
             album_artwork_pids[key] = track.db_id
+        # Store feed_url for podcast albums
+        if track.podcast_rss_url and key not in album_feed_urls:
+            album_feed_urls[key] = track.podcast_rss_url
 
     # Compute album sort orders: name_order = rank by sort_name, sort_order = same
     album_sort_names: dict[tuple[str, str], str] = {}
@@ -759,15 +778,18 @@ def write_library_itdb(
         # artist_order for album = the album_artist order rank
         a_artist_order = _lookup_order(orders, 'album_artist', album_artist_name)
 
+        a_feed_url = album_feed_urls.get(key)
+
         cur.execute(
             "INSERT INTO album (pid, kind, artwork_status, artwork_item_pid, "
             "artist_pid, user_rating, name, name_order, all_compilations, "
             "feed_url, season_number, is_unknown, has_songs, has_music_videos, "
             "sort_order, artist_order, has_any_compilations, sort_name, "
             "artist_count_calc, has_movies, item_count) "
-            "VALUES (?, 2, 0, ?, ?, 0, ?, ?, ?, NULL, 0, ?, 1, 0, ?, ?, ?, ?, 0, 0, ?)",
+            "VALUES (?, 2, 0, ?, ?, 0, ?, ?, ?, ?, 0, ?, 1, 0, ?, ?, ?, ?, 0, 0, ?)",
             (album_pid, _s64(artwork_pid), a_pid,
-             album_name or None, a_name_order, is_compilation, is_unknown,
+             album_name or None, a_name_order, is_compilation,
+             a_feed_url, is_unknown,
              a_name_order, a_artist_order, is_compilation, a_sort_name,
              item_count)
         )
@@ -848,6 +870,7 @@ def write_library_itdb(
         composer_pid = composer_map.get(comp, 0)
 
         genre_id = genre_map.get(track.genre or "", 0)
+        cat_id = category_map.get(track.category or "", 0)
 
         media_kind = _media_kind(track)
 
@@ -935,7 +958,7 @@ def write_library_itdb(
                 ?, ?, ?, NULL,
                 ?, ?, ?, ?,
                 ?, ?, ?, NULL,
-                0, ?, 0,
+                0, ?, ?,
                 ?, ?, ?,
                 ?, ?, ?, ?, ?,
                 ?, ?, ?,
@@ -965,7 +988,7 @@ def write_library_itdb(
                 float(track.length),
                 track.track_number, track.total_tracks, track.disc_number, track.total_discs,
                 track.bpm, track.volume, track.eq_setting,
-                genre_id,
+                genre_id, cat_id,
                 album_pid, artist_pid, composer_pid,
                 track.title, track.artist, track.album,
                 track.album_artist, track.composer,
@@ -1011,6 +1034,20 @@ def write_library_itdb(
                 track.sound_check,
             )
         )
+
+        # ── podcast_info (podcast tracks only) ────────────────────────
+        if _is_podcast(track):
+            cur.execute(
+                """INSERT INTO podcast_info (
+                    item_pid, date_released, external_guid,
+                    feed_url, feed_keywords
+                ) VALUES (?, ?, NULL, ?, NULL)""",
+                (
+                    _s64(track.db_id),
+                    date_released,
+                    track.podcast_rss_url,
+                )
+            )
 
     # ── track_size_calc ────────────────────────────────────────────────
     # Three rows: audio, video, music_video with total file sizes

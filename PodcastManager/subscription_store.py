@@ -143,7 +143,7 @@ class SubscriptionStore:
         """Batch-update multiple feeds and save once.
 
         Returns:
-            Number of feed entries that changed.
+            Number of feed entries that were provided.
         """
         self._ensure_loaded()
         if not feeds:
@@ -153,20 +153,16 @@ class SubscriptionStore:
             feed.feed_url: feed for feed in self._feeds
         }
 
-        changed = 0
         for feed in feeds:
-            existing = by_url.get(feed.feed_url)
-            if existing != feed:
-                by_url[feed.feed_url] = feed
-                changed += 1
+            by_url[feed.feed_url] = feed
 
-        if changed:
-            # Keep insertion order stable for existing feeds;
-            # new feeds are appended at the end.
-            self._feeds = list(by_url.values())
-            self.save()
+        # Always save — callers often modify feed objects in-place
+        # (e.g. RSS merge, reconciliation), making value-based change
+        # detection unreliable when the same objects are passed back.
+        self._feeds = list(by_url.values())
+        self.save()
 
-        return changed
+        return len(feeds)
 
     def feed_dir(self, feed: PodcastFeed) -> str:
         """Return the PC-local download directory for a feed's episodes.

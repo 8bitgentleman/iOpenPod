@@ -1108,6 +1108,12 @@ class PodcastBrowser(QFrame):
                 self._mark_feed_refreshed(f.feed_url)
         if count:
             self._set_status(f"Refreshed {count} feed{'s' if count != 1 else ''}")
+
+        # Reconcile episode statuses after RSS merge so that episodes
+        # present on the iPod (but only known from RSS, not yet stored)
+        # are correctly marked as "On iPod".
+        self.reconcile_ipod_statuses()
+
         self._refresh_feed_list()
 
         # Re-display the currently selected feed's episodes with full catalog
@@ -1182,9 +1188,16 @@ class PodcastBrowser(QFrame):
         except Exception:
             pass
 
+        # Reconcile episode statuses against actual iPod tracks before
+        # building the plan.  This ensures episodes synced in a prior run
+        # are correctly marked as "On iPod" even if the subscription store
+        # on disk was stale (e.g. NOT_DOWNLOADED episodes from RSS that
+        # were synced but never persisted with ON_IPOD status).
+        self.reconcile_ipod_statuses(ipod_tracks)
+
         from PodcastManager.podcast_sync import build_podcast_managed_plan
 
-        # Re-read feeds from store (they were just updated)
+        # Re-read feeds from store (they were just updated by reconcile)
         feeds = self._store.get_feeds()
         plan = build_podcast_managed_plan(feeds, ipod_tracks, self._store)
 

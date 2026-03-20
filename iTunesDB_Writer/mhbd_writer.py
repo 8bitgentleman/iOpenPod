@@ -935,6 +935,10 @@ def write_itunesdb(
         #   - So hash58 depends on hash72 being present in the data
         #   - iTunes writes hash72 first, then hash58
 
+        # Set hashing_scheme BEFORE computing any hashes — hash72's SHA1
+        # includes this field (not zeroed), so it must have its final value.
+        struct.pack_into('<H', itdb_data, MHBD_OFFSET_HASHING_SCHEME, 1)
+
         # Step 1: Write HASH72 first (if reference has it)
         if source_itdb and len(source_itdb) >= 0xA0 and source_itdb[0x72:0x74] == bytes([0x01, 0x00]):
             from .hash72 import extract_hash_info_to_dict, _compute_itunesdb_sha1, _hash_generate
@@ -967,9 +971,6 @@ def write_itunesdb(
         else:
             logger.error("No FireWire ID and no reference hash58 — database will be rejected!")
 
-        # Set hashing_scheme to 1 (hash58 is the primary scheme)
-        struct.pack_into('<H', itdb_data, MHBD_OFFSET_HASHING_SCHEME, 1)
-
     elif checksum_type == ChecksumType.HASH72:
         # Try to get hash info from centralized store first, then fall back to disk
         from .hash72 import extract_hash_info_to_dict, read_hash_info, _compute_itunesdb_sha1, _hash_generate, HashInfo
@@ -991,6 +992,13 @@ def write_itunesdb(
                 hash_info = read_hash_info(ipod_path)
             except Exception:
                 pass
+
+        # Set hashing_scheme BEFORE computing hash72 — the SHA1 includes
+        # this field (it is NOT zeroed), so it must have its final value
+        # when the hash is computed.  libgpod itdb_hash72_write_hash sets
+        # this to ITDB_CHECKSUM_HASH72 (2), not 1.  Using 1 causes the
+        # Nano 5G firmware to check hash58 instead of hash72.
+        struct.pack_into('<H', itdb_data, MHBD_OFFSET_HASHING_SCHEME, 2)
 
         # Write HASH72 signature
         hash72_ok = False
@@ -1019,22 +1027,10 @@ def write_itunesdb(
             logger.info("HASH72 signature written from HashInfo file")
             hash72_ok = True
 
-        # iTunes writes BOTH hash72 and hash58 with hash_scheme=1.
-        # The firmware checks hash58 when hash_scheme=1, so we must also
-        # write hash58 AFTER hash72 (hash58 computation preserves hash72).
-        if hash72_ok:
-            struct.pack_into('<H', itdb_data, MHBD_OFFSET_HASHING_SCHEME, 1)
-            if firewire_id is None:
-                try:
-                    from device_info import get_firewire_id
-                    firewire_id = get_firewire_id(ipod_path)
-                except Exception as e:
-                    logger.warning("Could not get FireWire ID for HASH58: %s", e)
-            if firewire_id:
-                write_hash58(itdb_data, firewire_id)
-                logger.info("HASH58 signature also written (FireWire ID: %s)", firewire_id.hex())
-            else:
-                logger.warning("No FireWire ID — hash58 left empty, device may reject database")
+        # Nano 5G uses HASH72 only — do NOT write hash58.
+        # libgpod itdb_hash72_write_hash only computes hash72 (hashing_scheme=2).
+        # Writing hash58 here with scheme=1 causes the firmware to verify
+        # hash58 and potentially reject the database if hash58 is wrong.
 
     elif checksum_type == ChecksumType.HASHAB:
         # iPod Nano 6G/7G — white-box AES via WASM module

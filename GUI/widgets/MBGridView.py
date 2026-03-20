@@ -246,8 +246,15 @@ class MusicBrowserGrid(QFrame):
     def showEvent(self, a0):
         super().showEvent(a0)
         # When the widget becomes visible (e.g. stacked-widget page switch),
-        # force the layout to recalculate — items may have been added while
-        # hidden (width=0), leaving them all at position (0, 0).
-        if self.width() > 0 and self._flow.count():
-            self._flow.activate()
-            self.setMinimumHeight(self._flow.heightForWidth(self.width()))
+        # defer the relayout to after Qt finishes settling geometry.
+        # Items added while hidden (width=0) are all at (0,0); activate() is
+        # a no-op when Qt thinks the layout is current, so we call
+        # setGeometry() directly to force a real repositioning pass.
+        if self._flow.count():
+            QTimer.singleShot(0, self._force_relayout)
+
+    def _force_relayout(self):
+        w = self.width()
+        if w > 0 and self._flow.count():
+            self._flow.setGeometry(self.rect())
+            self.setMinimumHeight(self._flow.heightForWidth(w))
