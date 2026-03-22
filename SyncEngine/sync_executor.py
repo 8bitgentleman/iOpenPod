@@ -166,6 +166,7 @@ class _SyncContext:
 
     # ── GUI-decoupled inputs (passed forward, not pulled from GUI) ──
     user_playlists: list[dict] = field(default_factory=list)
+    remove_playlist_names: list[str] = field(default_factory=list)
     on_sync_complete: Optional[Callable[[], None]] = None
     compute_sound_check: bool = False
     scrobble_on_sync: bool = False
@@ -252,6 +253,7 @@ class SyncExecutor:
         aac_quality: str = "normal",
         *,
         user_playlists: Optional[list[dict]] = None,
+        remove_playlist_names: Optional[list[str]] = None,
         on_sync_complete: Optional[Callable[[], None]] = None,
         compute_sound_check: bool = False,
         scrobble_on_sync: bool = False,
@@ -277,6 +279,7 @@ class SyncExecutor:
             write_back_to_pc=write_back_to_pc,
             _is_cancelled=is_cancelled,
             user_playlists=list(user_playlists) if user_playlists else [],
+            remove_playlist_names=list(remove_playlist_names) if remove_playlist_names else [],
             on_sync_complete=on_sync_complete,
             compute_sound_check=compute_sound_check,
             scrobble_on_sync=scrobble_on_sync,
@@ -458,6 +461,18 @@ class SyncExecutor:
 
     def _merge_gui_playlists(self, ctx: _SyncContext) -> None:
         """Merge user-created playlists into ctx."""
+        # Remove playlists by name first (before merging new/updated ones).
+        if ctx.remove_playlist_names:
+            remove_lower = {n.lower() for n in ctx.remove_playlist_names}
+            before = len(ctx.existing_playlists_raw)
+            ctx.existing_playlists_raw = [
+                pl for pl in ctx.existing_playlists_raw
+                if (pl.get("Title") or pl.get("Name") or pl.get("Playlist Name", "")).lower()
+                not in remove_lower
+            ]
+            removed = before - len(ctx.existing_playlists_raw)
+            logger.info("Removed %d playlist(s) by name: %s", removed, ctx.remove_playlist_names)
+
         user_pls = ctx.user_playlists
         if not user_pls:
             return
@@ -486,8 +501,10 @@ class SyncExecutor:
                             break
                 if not replaced:
                     ctx.existing_playlists_raw.append(upl)
-            logger.info("Merged user playlist '%s' (id=0x%X, new=%s)",
-                        upl.get("Title", "?"), pid, is_new)
+            logger.info("Merged user playlist '%s' (id=%s, new=%s)",
+                        upl.get("Title", "?"),
+                        ("0x%X" % pid) if pid is not None else "new",
+                        is_new)
             ctx.progress("playlists", idx + 1, len(user_pls),
                          message=f"Merged playlist: {upl.get('Title', '?')}")
 
@@ -1748,7 +1765,13 @@ class SyncExecutor:
                     pl.update(extract_mhod_strings(mhod_children))
                     pl.update(extract_playlist_extras(mhod_children))
                     mhip_children = pl.pop("mhip_children", [])
-                    pl["items"] = mhip_children
+                    items = []
+                    for mhip in mhip_children:
+                        mhip_data = (mhip.get("data", {})
+                                     if isinstance(mhip, dict) and "data" in mhip
+                                     else mhip)
+                        items.append({"track_id": mhip_data.get("track_id", 0)})
+                    pl["items"] = items
 
             # Dataset 2: regular + user playlists (mhlp)
             # libgpod prefers DS3 over DS2 and only reads ONE.  We prefer
